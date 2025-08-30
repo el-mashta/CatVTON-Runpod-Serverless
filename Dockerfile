@@ -1,57 +1,71 @@
-FROM timpietruskyblibla/runpod-worker-comfy:3.6.0-base
+# ====================================================================================
+# Stage 1: Model Downloader
+# This stage's only job is to download all the necessary models from Hugging Face.
+# ====================================================================================
+FROM python:3.9-slim as downloader
 
-# Set environment variables
-ENV PYTHONUNBUFFERED=1
+# Install huggingface-cli for robust model downloading
+RUN pip install huggingface_hub
 
-# Install dependencies for CatVTON including unzip
-WORKDIR /workspace
-RUN apt-get update && apt-get install -y \
-    python3-opencv \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    unzip \
-    wget \
-    && rm -rf /var/lib/apt/lists/*
+# Set the cache directory where all models will be stored
+ENV HF_HOME=/models
+ENV HUGGINGFACE_HUB_CACHE=/models
 
-# Create directory for custom nodes if it doesn't exist
-WORKDIR /workspace/ComfyUI/custom_nodes
-RUN mkdir -p /workspace/ComfyUI/custom_nodes
+# Download the models. --local-dir-use-symlinks False is crucial for Docker.
+RUN huggingface-cli download booksforcharlie/stable-diffusion-inpainting \
+    --local-dir ${HF_HOME}/stable-diffusion-inpainting --local-dir-use-symlinks False
 
-# Download and extract ComfyUI-CatVTON
+RUN huggingface-cli download zhengchong/CatVTON \
+    --local-dir ${HF_HOME}/CatVTON --local-dir-use-symlinks False
+
+# ====================================================================================
+# Stage 2: Final Production Image
+# This is the final, lean image that will be deployed.
+# ====================================================================================
+# Use the official, up-to-date RunPod worker image for ComfyUI.
+# This base image already contains a Python virtual environment at /opt/venv
+# which is managed by uv and is already added to the system PATH.
+FROM runpod/worker-comfyui:5.4.0-base
+
+# Install unzip, as it's not in the base image
+RUN apt-get update && apt-get install -y unzip && rm -rf /var/lib/apt/lists/*
+
+# Explicitly set UV_PROJECT_ENVIRONMENT to use the venv created by the base image.
+# This ensures all `uv` commands operate within this isolated environment.
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv
+
+# Set environment variables for our API server and model locations
+ENV PORT=8000
+ENV HF_HOME=/comfyui/models/huggingface
+ENV HUGGINGFACE_HUB_CACHE=/comfyui/models/huggingface
+ENV TRANSFORMERS_CACHE=/comfyui/models/huggingface
+
+# Copy the pre-downloaded models from our downloader stage into the correct location.
+COPY --from=downloader /models /comfyui/models/huggingface
+
+# Install the ComfyUI-CatVTON custom node
+WORKDIR /comfyui/custom_nodes
 RUN wget https://github.com/Zheng-Chong/CatVTON/releases/download/ComfyUI/ComfyUI-CatVTON.zip && \
     unzip ComfyUI-CatVTON.zip && \
     rm ComfyUI-CatVTON.zip
 
-# Create workflows directory if it doesn't exist
-RUN mkdir -p /workspace/ComfyUI/workflows
+# Install Python requirements for the CatVTON custom node using `uv`.
+# This will automatically use the /opt/venv virtual environment.
+WORKDIR /comfyui/custom_nodes/ComfyUI-CatVTON
+RUN if [ -f requirements.txt ]; then uv pip install -r requirements.txt; fi
 
-# Download workflow file
-WORKDIR /workspace/ComfyUI/workflows
-RUN wget https://github.com/Zheng-Chong/CatVTON/releases/download/ComfyUI/catvton_workflow.json
+# Install our FastAPI server dependencies using `uv`.
+WORKDIR /
+RUN uv pip install fastapi uvicorn httpx pydantic websockets
 
-# Install Python requirements for CatVTON
-WORKDIR /workspace/ComfyUI/custom_nodes/ComfyUI-CatVTON
-RUN if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+# Copy our application files into the container's root directory.
+COPY app.py .
+COPY catvton_workflow.json .
 
-# Install additional pip packages to handle image processing
-RUN pip install pillow numpy requests
+# Expose the port our API will run on
+EXPOSE 8000
 
-# Fix any potential permissions issues
-WORKDIR /workspace
-RUN chmod -R 755 /workspace/ComfyUI
-RUN chmod -R 755 /workspace/ComfyUI/custom_nodes/ComfyUI-CatVTON
-
-# Copy the client script into the container
-COPY test.py /workspace/
-
-# Create a directory for test images
-RUN mkdir -p /workspace/test_images
-
-# Return to workspace directory
-WORKDIR /workspace
-
-# Add healthcheck
-HEALTHCHECK --interval=30s --timeout=30s --start-period=60s --retries=3 \
-  CMD curl --fail http://localhost:8188/system_stats || exit 1
-
-# Do not override the ENTRYPOINT from the base image
+# The final command to start our FastAPI server.
+# This `uvicorn` executable is the one installed inside the /opt/venv.
+# We override the base image's default CMD.
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

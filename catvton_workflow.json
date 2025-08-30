@@ -121,7 +121,7 @@
         "Node name for S&R": "LoadImage"
       },
       "widgets_values": [
-        "1300-28.jpg",
+        "garment.jpg",
         "image"
       ],
       "shape": 2
@@ -223,7 +223,7 @@
         "Node name for S&R": "LoadImage"
       },
       "widgets_values": [
-        "1300.jpg",
+        "person.jpg",
         "image"
       ],
       "shape": 2
