@@ -1,0 +1,17 @@
+[project]
+name = "catvton-runpod-serverless"
+version = "1.0.0"
+description = "A load-balanced serverless API for CatVTON on RunPod using ComfyUI."
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "httpx",
+    "pydantic",
+    "websockets",
+    "boto3",
+    "pillow",
+    "python-dotenv",
+    "pillow-heif",
+    "requests",
+]
