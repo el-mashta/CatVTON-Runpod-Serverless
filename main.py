@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 # --- Runpod API and S3 Configuration ---
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
-RUNPOD_ENDPOINT_ID = "h7t5tejs00z7cn"
+RUNPOD_ENDPOINT_ID = os.getenv("RUNPOD_ENDPOINT_ID")
 S3_ENDPOINT_URL = os.getenv("RUNPOD_S3_ENDPOINT_URL")
 S3_ACCESS_KEY_ID = os.getenv("RUNPOD_S3_ACCESS_KEY_ID")
 S3_SECRET_ACCESS_KEY = os.getenv("RUNPOD_S3_SECRET_ACCESS_KEY")

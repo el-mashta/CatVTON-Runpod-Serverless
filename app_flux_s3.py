@@ -68,8 +68,9 @@ async def lifespan(app: FastAPI):
     logger.info(f"S3 client initialized for bucket '{S3_BUCKET_NAME}'.")
 
     # --- Model Loading ---
-    base_model_path = "/app/models/FLUX.1-Fill-dev"
-    resume_path = "/app/models/CatVTON"
+    # Models are now loaded from the network volume for faster cold starts.
+    base_model_path = "/runpod-volume/models/FLUX.1-Fill-dev"
+    resume_path = "/runpod-volume/models/CatVTON"
     try:
         pipeline = FluxTryOnPipeline.from_pretrained(base_model_path)
         pipeline.load_lora_weights(os.path.join(resume_path, "flux-lora"), weight_name='pytorch_lora_weights.safetensors')

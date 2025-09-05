@@ -1,73 +1,55 @@
 # ====================================================================================
-# Stage 1: Model Downloader (FLUX S3 Version)
-# Use a more robust base image to ensure network stability during downloads.
+# Final Production Image (FLUX S3 Version with Network Volume)
+# This Dockerfile creates a lean image that expects models to be on a network volume.
 # ====================================================================================
-FROM ubuntu:22.04 AS downloader
+FROM nvidia/cuda:12.1.1-base-ubuntu22.04
 
-# Install Python 3.9, pip, and curl
+WORKDIR /app
+
+# Install system dependencies, including git for the diffusers dependency
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.9 \
-    python3-pip \
+    build-essential \
     curl \
     ca-certificates \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv, the Rust-based Python package manager
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:$PATH"
 
-# Install the full huggingface_hub[cli] package to get the modern `hf` command
-RUN uv pip install --system "huggingface_hub[cli]"
-
-ENV HF_HOME=/models
-ENV HUGGINGFACE_HUB_CACHE=/models
-
-# Use Docker Build Secret to securely access the Hugging Face token
-RUN --mount=type=secret,id=hf_token \
-    HF_TOKEN=$(cat /run/secrets/hf_token) hf download black-forest-labs/FLUX.1-Fill-dev --local-dir ${HF_HOME}/FLUX.1-Fill-dev
-
-RUN hf download zhengchong/CatVTON --local-dir ${HF_HOME}/CatVTON
-
-# ====================================================================================
-# Stage 2: Final Production Image (FLUX S3 Version)
-# This stage remains unchanged, starting from the lean CUDA base image.
-# ====================================================================================
-FROM nvidia/cuda:12.1.1-base-ubuntu22.04
-
-WORKDIR /app
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:$PATH"
-
+# Set up cache directories for uv
 ENV UV_CACHE_DIR=/opt/uv/cache
 ENV UV_PYTHON_INSTALL_DIR=/opt/python
-ENV UV_NO_CACHE=1
 
+# Install a specific Python version
 RUN uv python install 3.9
 
+# Create and activate a virtual environment
 ENV VENV_PATH=/opt/venv
 ENV UV_PROJECT_ENVIRONMENT=$VENV_PATH
 RUN uv venv $VENV_PATH --python 3.9
 ENV PATH="$VENV_PATH/bin:$PATH"
 
-RUN uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-RUN uv pip install boto3 botocore
+# Copy only the requirements file first to leverage Docker layer caching
+COPY ./CatVTON/requirements.txt /app/requirements.txt
 
+# Install all Python dependencies in a single, consolidated step
+# This includes torch, s3 dependencies, and the project requirements
+RUN uv pip install \
+    --index-url https://download.pytorch.org/whl/cu121 \
+    torch torchvision torchaudio \
+    boto3 botocore \
+    -r /app/requirements.txt
+
+# Now copy the rest of the application code
 COPY ./CatVTON /app/CatVTON
-RUN uv pip install -r /app/CatVTON/requirements.txt
-
-COPY --from=downloader /models /app/models
-
-ENV HF_HOME=/app/models
-ENV HUGGINGFACE_HUB_CACHE=/app/models
-
 COPY app_flux_s3.py ./app.py
+
+# Models are NOT copied. They will be loaded from the /runpod-volume mount.
+# Set the HF_HOME to the network volume path so transformers can find models there.
+ENV HF_HOME=/runpod-volume/models
+ENV HUGGINGFACE_HUB_CACHE=/runpod-volume/models
 
 EXPOSE 8000
 CMD ["python", "-u", "app.py"]
