@@ -8,6 +8,7 @@
 import os
 import sys
 import logging
+import uuid
 from contextlib import asynccontextmanager
 
 # --- Dynamic Path Setup ---
@@ -26,7 +27,7 @@ from PIL import Image
 # CatVTON specific imports
 from model.pipeline import CatVTONPipeline
 from model.cloth_masker import AutoMasker
-from utils import resize_and_crop, resize_and_padding
+from utils import resize_and_crop, resize_and_padding, init_weight_dtype
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -60,23 +61,22 @@ async def lifespan(app: FastAPI):
     base_model_path = os.path.join(NETWORK_VOLUME_PATH, "models", "stable-diffusion-inpainting")
     catvton_model_path = os.path.join(NETWORK_VOLUME_PATH, "models", "CatVTON")
     
-    # Check if model paths exist before loading
-    if not os.path.isdir(base_model_path):
-        logger.error(f"FATAL: Base model directory not found at '{base_model_path}'. The worker cannot start.")
-        raise RuntimeError(f"Base model directory not found: {base_model_path}")
-    if not os.path.isdir(catvton_model_path):
-        logger.error(f"FATAL: CatVTON model directory not found at '{catvton_model_path}'. The worker cannot start.")
-        raise RuntimeError(f"CatVTON model directory not found: {catvton_model_path}")
+    if not os.path.isdir(base_model_path) or not os.path.isdir(catvton_model_path):
+        logger.error(f"FATAL: Model directory not found. Searched for '{base_model_path}' and '{catvton_model_path}'.")
+        raise RuntimeError("Model directory not found.")
 
     logger.info(f"Base model path: {base_model_path}")
     logger.info(f"CatVTON adapter path: {catvton_model_path}")
 
     try:
         logger.info("Initializing CatVTONPipeline...")
+        # CORRECTED INITIALIZATION: Pass device and dtype to the constructor.
         pipeline = CatVTONPipeline(
             base_ckpt=base_model_path,
             attn_ckpt=catvton_model_path,
-        ).to("cuda", torch.float16)
+            device="cuda",
+            weight_dtype=torch.float16
+        )
         logger.info("CatVTONPipeline loaded successfully.")
 
         logger.info("Initializing AutoMasker...")
@@ -100,7 +100,6 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/ping")
 async def health_check():
     """Health check endpoint for RunPod load balancer."""
-    # If this endpoint is reachable, it means the lifespan startup was successful.
     return {"status": "healthy"}
 
 @app.post("/api/v1/tryon", response_model=TryOnResponse)
@@ -110,54 +109,47 @@ async def virtual_tryon(request: TryOnRequest):
         raise HTTPException(status_code=503, detail="Worker is not ready or is initializing.")
 
     try:
-        # Construct full paths from the relative paths provided in the request
         person_image_full_path = os.path.join(NETWORK_VOLUME_PATH, request.person_image_path)
         garment_image_full_path = os.path.join(NETWORK_VOLUME_PATH, request.garment_image_path)
 
         logger.info(f"Processing request: Person='{person_image_full_path}', Garment='{garment_image_full_path}'")
 
-        if not os.path.exists(person_image_full_path):
-            raise HTTPException(status_code=404, detail=f"Person image not found at: {person_image_full_path}")
-        if not os.path.exists(garment_image_full_path):
-            raise HTTPException(status_code=404, detail=f"Garment image not found at: {garment_image_full_path}")
+        if not os.path.exists(person_image_full_path) or not os.path.exists(garment_image_full_path):
+            raise HTTPException(status_code=404, detail="Input image not found on network volume.")
 
         person_image = Image.open(person_image_full_path).convert("RGB")
         garment_image = Image.open(garment_image_full_path).convert("RGB")
 
-        # Preprocess images
         width, height = 768, 1024
         person_image = resize_and_crop(person_image, (width, height))
         garment_image = resize_and_padding(garment_image, (width, height))
         logger.info("Images preprocessed.")
 
-        # Generate mask
-        mask = automasker(person_image, cloth_type=request.cloth_type)['mask']
+        mask = automasker(person_image, mask_type=request.cloth_type)['mask']
         logger.info("Mask generated.")
 
-        # Set up generator for reproducibility
         generator = torch.Generator(device='cuda').manual_seed(request.seed) if request.seed != -1 else None
 
-        # Run inference
         logger.info("Starting inference pipeline...")
         with torch.inference_mode():
+            # The pipeline call in the original code was incorrect for an inpainting model.
+            # It requires 'image', 'condition_image', and 'mask'.
             result_image = pipeline(
                 image=person_image,
                 condition_image=garment_image,
-                mask_image=mask,
+                mask=mask,
                 height=height,
                 width=width,
                 num_inference_steps=50,
-                guidance_scale=7.5,
+                guidance_scale=2.5, # Adjusted to a more standard value for inpainting
                 generator=generator
-            ).images[0]
+            )[0] # The pipeline returns a list of images
         logger.info("Inference complete.")
 
-        # Save result back to the network volume
-        result_filename = f"result_{os.path.basename(request.person_image_path)}_{os.path.basename(request.garment_image_path)}"
+        result_filename = f"result_{uuid.uuid4().hex}.png"
         result_relative_path = os.path.join("results", result_filename)
         result_full_path = os.path.join(NETWORK_VOLUME_PATH, result_relative_path)
         
-        # Ensure the results directory exists
         os.makedirs(os.path.dirname(result_full_path), exist_ok=True)
         
         result_image.save(result_full_path)

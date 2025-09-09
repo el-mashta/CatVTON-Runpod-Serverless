@@ -1,0 +1,89 @@
+# ====================================================================================
+# Dockerfile for a Development Pod Environment
+# ====================================================================================
+# This Dockerfile creates a container that is IDENTICAL to the serverless worker
+# environment but includes SSH, Jupyter Lab, and other development tools.
+#
+# Use this to launch a Pod with your network volume attached to safely manage
+# files, run scripts (like optimize_models.py), and build the venv.
+# ====================================================================================
+
+# Start from the exact same base image as the serverless worker
+FROM nvidia/cuda:12.1.1-base-ubuntu22.04
+
+# --- 1. Environment Setup ---
+# Prevents interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+WORKDIR /
+
+# --- 2. Install System Dependencies ---
+# Install SSH, sudo for user management, git for version control, and other essentials.
+# Add software-properties-common to manage PPAs (for Python 3.9).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openssh-server \
+    sudo \
+    git \
+    vim \
+    curl \
+    ca-certificates \
+    bash \
+    software-properties-common \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- 3. Python 3.9 Installation ---
+# Install Python 3.9 from the deadsnakes PPA, as Ubuntu 22.04 defaults to 3.10.
+RUN add-apt-repository ppa:deadsnakes/ppa && \
+    apt-get update && \
+    apt-get install -y python3.9 python3.9-venv python3-pip
+
+# --- 4. Python Environment Setup ---
+# Create a standard virtual environment for our tools using Python 3.9.
+ENV VENV_PATH="/opt/venv"
+RUN python3.9 -m venv ${VENV_PATH}
+
+# Add the venv's bin directory to the PATH.
+# This makes `pip`, `python`, and later `jupyter` available directly.
+ENV PATH="${VENV_PATH}/bin:$PATH"
+
+# --- 5. SSH Configuration ---
+# Create a non-root user 'runpod' for safer SSH access, similar to RunPod's default templates.
+RUN useradd -m -s /bin/bash -G sudo runpod && \
+    echo "runpod:runpod" | chpasswd
+
+# Create SSH directory and authorize the public key
+RUN mkdir -p /home/runpod/.ssh && \
+    echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE8reWxn0Px1daHxku3K1jj1dEu4bCghmoGUx1Y3h4ye sharif@keystone" > /home/runpod/.ssh/authorized_keys && \
+    chown -R runpod:runpod /home/runpod/.ssh && \
+    chmod 700 /home/runpod/.ssh && \
+    chmod 600 /home/runpod/.ssh/authorized_keys
+
+# Configure the SSH daemon
+# PermitRootLogin is useful for debugging inside the container if needed.
+RUN echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
+    echo "PasswordAuthentication no" >> /etc/ssh/sshd_config && \
+    echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config && \
+    mkdir -p /run/sshd
+
+# --- 6. Jupyter Lab and Python Tools Installation ---
+# Upgrade pip and install the required tools into our dedicated venv.
+RUN pip install --upgrade pip && \
+    pip install \
+    jupyterlab \
+    boto3 \
+    python-dotenv
+
+# --- 7. Startup Script ---
+# Copy the startup script that launches the SSH and Jupyter services.
+COPY start.sh /start.sh
+RUN chmod +x /start.sh
+
+
+
+# --- 7. Expose Ports and Set Command ---
+EXPOSE 22 8888
+
+# The /workspace directory is where RunPod will mount the network volume.
+WORKDIR /workspace
+
+# Run the startup script when the container launches.
+CMD ["/start.sh"]

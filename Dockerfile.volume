@@ -1,37 +1,42 @@
 # ====================================================================================
 # Lightweight Launcher Image for Full Network Volume Architecture
-# This image is minimal and relies on an entrypoint script to set up the
-# environment on a network volume.
+# Using the optimal CUDA 12.1 BASE image. This image provides the driver,
+# but not the runtime, which prevents conflicts with PyTorch's bundled libraries.
 # ====================================================================================
 FROM nvidia/cuda:12.1.1-base-ubuntu22.04
 
 WORKDIR /app
 
-# Install essential system dependencies. git is not needed here as code is pre-synced.
+# Install essential system dependencies, including a comprehensive set for OpenCV.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
+    bash \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv, the Rust-based Python package manager
+# Install uv.
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:$PATH"
 
-# Copy the application server and the entrypoint script into the image
+# Copy the application server logic and the entrypoint script.
 COPY app_sd_volume.py .
 COPY entrypoint.sh .
 
-# Make the entrypoint script executable
+# Make the entrypoint script executable.
 RUN chmod +x /app/entrypoint.sh
 
-# Set environment variables that the entrypoint and application will use
-# These point to locations on the network volume
+# --- Environment Variable Configuration ---
 ENV HF_HOME=/runpod-volume/models
 ENV HUGGINGFACE_HUB_CACHE=/runpod-volume/models
-ENV UV_PROJECT_ENVIRONMENT=/runpod-volume/venv
+ENV VENV_SITE_PACKAGES=/runpod-volume/venv/lib/python3.9/site-packages
+ENV PYTHONPATH=${VENV_SITE_PACKAGES}:/runpod-volume/CatVTON
 
 EXPOSE 8000
 
-# Set the entrypoint script as the command to run when the container starts
+# Set the entrypoint script as the command to run when the container starts.
 CMD ["/bin/bash", "/app/entrypoint.sh"]
-

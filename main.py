@@ -1,11 +1,10 @@
 import logging
 import sys
+from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from PIL import Image, ImageOps
-import base64
-import json
 import shutil
 import uuid
 import os
@@ -35,10 +34,11 @@ RUNPOD_ENDPOINT_ID = os.getenv("RUNPOD_ENDPOINT_ID")
 S3_ENDPOINT_URL = os.getenv("RUNPOD_S3_ENDPOINT_URL")
 S3_ACCESS_KEY_ID = os.getenv("RUNPOD_S3_ACCESS_KEY_ID")
 S3_SECRET_ACCESS_KEY = os.getenv("RUNPOD_S3_SECRET_ACCESS_KEY")
-S3_BUCKET_NAME = os.getenv("RUNPOD_S3_BUCKET_NAME") # Bucket name is the same as the endpoint ID
+S3_BUCKET_NAME = os.getenv("RUNPOD_S3_BUCKET_NAME")
+S3_REGION = os.getenv("RUNPOD_S3_REGION", "eu-ro-1") # Make region configurable
 
 # --- Validation and S3 Client Initialization ---
-if not all([RUNPOD_API_KEY, RUNPOD_ENDPOINT_ID, S3_ENDPOINT_URL, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY]):
+if not all([RUNPOD_API_KEY, RUNPOD_ENDPOINT_ID, S3_ENDPOINT_URL, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_BUCKET_NAME]):
     logger.error("CRITICAL: Missing one or more Runpod API or S3 environment variables.")
     s3_client = None
 else:
@@ -47,21 +47,19 @@ else:
         endpoint_url=S3_ENDPOINT_URL,
         aws_access_key_id=S3_ACCESS_KEY_ID,
         aws_secret_access_key=S3_SECRET_ACCESS_KEY,
-        region_name="eu-ro-1",
+        region_name=S3_REGION,
         config=Config(signature_version='s3v4')
     )
 
 app = FastAPI()
 
-# (CORS Middleware remains the same)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Simplified for brevity, use your specific origins
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
@@ -71,7 +69,6 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(RESULT_DIR, exist_ok=True)
 
 def prepare_image(path, request_id=""):
-    # This function remains the same
     logger.debug(f"[{request_id}] Preparing image: {path}")
     img = Image.open(path)
     img = ImageOps.exif_transpose(img).convert("RGB")
@@ -80,12 +77,16 @@ def prepare_image(path, request_id=""):
     logger.debug(f"[{request_id}] Image saved to {jpg_path}")
     return jpg_path
 
-def image_to_base64(filepath):
-    with open(filepath, "rb") as img_file:
-        return base64.b64encode(img_file.read()).decode('utf-8')
-
 @app.post("/api/tryon")
-async def tryon(person: UploadFile = File(...), cloth: UploadFile = File(...), garment_des: str = Form("shirt"), category: str = Form("upper_body")):
+async def tryon(
+    person: UploadFile = File(...), 
+    cloth: UploadFile = File(...), 
+    garment_des: Optional[str] = Form(None), 
+    category: Optional[str] = Form(None)
+):
+    if not s3_client:
+        return JSONResponse(content={"error": "S3 client is not configured."}, status_code=500)
+
     request_id = uuid.uuid4().hex
     logger.info(f"[{request_id}] Received new try-on request.")
 
@@ -93,6 +94,12 @@ async def tryon(person: UploadFile = File(...), cloth: UploadFile = File(...), g
     cloth_filename = f"cloth_{request_id}.jpg"
     local_person_path = os.path.join(UPLOAD_DIR, person_filename)
     local_cloth_path = os.path.join(UPLOAD_DIR, cloth_filename)
+    
+    s3_person_key = f"uploads/{person_filename}"
+    s3_cloth_key = f"uploads/{cloth_filename}"
+
+    final_local_person_path = None
+    final_local_cloth_path = None
     result_image_path = None
 
     try:
@@ -106,38 +113,44 @@ async def tryon(person: UploadFile = File(...), cloth: UploadFile = File(...), g
         final_local_person_path = await loop.run_in_executor(None, prepare_image, local_person_path, request_id)
         final_local_cloth_path = await loop.run_in_executor(None, prepare_image, local_cloth_path, request_id)
 
-        person_b64 = image_to_base64(final_local_person_path)
-        cloth_b64 = image_to_base64(final_local_cloth_path)
+        logger.info(f"[{request_id}] Uploading to S3 bucket '{S3_BUCKET_NAME}'")
+        await loop.run_in_executor(None, s3_client.upload_file, final_local_person_path, S3_BUCKET_NAME, s3_person_key)
+        await loop.run_in_executor(None, s3_client.upload_file, final_local_cloth_path, S3_BUCKET_NAME, s3_cloth_key)
+        logger.info(f"[{request_id}] S3 uploads complete.")
 
+        runpod_payload = {
+            "person_image_path": s3_person_key,
+            "garment_image_path": s3_cloth_key,
+            "mask_type": "upper",
+            "seed": -1
+        }
+        
         tryon_url = f"https://{RUNPOD_ENDPOINT_ID}.api.runpod.ai/api/v1/tryon"
         headers = {"Authorization": f"Bearer {RUNPOD_API_KEY}", "Content-Type": "application/json"}
-        payload = {
-            "person_image": person_b64,
-            "garment_image": cloth_b64
-        }
 
-        logger.info(f"[{request_id}] Sending POST request to custom load balancer endpoint.")
-
+        logger.info(f"[{request_id}] Sending request to Runpod Load Balancer.")
+        
         async with httpx.AsyncClient() as client:
-            response = await client.post(tryon_url, headers=headers, json=payload, timeout=300)
+            response = await client.post(tryon_url, headers=headers, json=runpod_payload, timeout=120.0)
         
         response.raise_for_status()
         result = response.json()
-
-        output_data = result.get('output', {})
         
-        # Assuming the output contains a base64 image string
-        image_b64_data = output_data.get('images', [{}])[0].get('image')
+        result_image_key = result.get('result_image_path')
+        if not result_image_key:
+             raise ValueError(f"Unexpected output format from worker: {result}")
 
-        if not image_b64_data:
-            raise ValueError("Output from worker is not a valid base64 image string.")
-
-        image_data = base64.b64decode(image_b64_data)
         result_image_path = os.path.join(RESULT_DIR, f"result_{request_id}.png")
-        with open(result_image_path, "wb") as f:
-            f.write(image_data)
+        logger.info(f"[{request_id}] Downloading result '{result_image_key}' from S3 to '{result_image_path}'")
+        await loop.run_in_executor(None, s3_client.download_file, S3_BUCKET_NAME, result_image_key, result_image_path)
         logger.info(f"[{request_id}] AI Try-on completed. Result saved to: {result_image_path}")
 
+    except httpx.TimeoutException:
+        logger.error(f"[{request_id}] Request to Runpod timed out. The worker may be cold starting or failing.")
+        return JSONResponse(content={"error": "The AI worker took too long to respond. Please try again in a few minutes."}, status_code=504) # Gateway Timeout
+    except httpx.HTTPStatusError as e:
+        logger.error(f"[{request_id}] HTTP error from Runpod: {e.response.status_code} - {e.response.text}")
+        return JSONResponse(content={"error": "The AI worker returned an error."}, status_code=502) # Bad Gateway
     except Exception as e:
         logger.exception(f"[{request_id}] An unexpected error occurred.")
         return JSONResponse(content={"error": "An error occurred while processing the request."}, status_code=500)
@@ -151,11 +164,10 @@ async def tryon(person: UploadFile = File(...), cloth: UploadFile = File(...), g
 
     return {"output": f"/results/{os.path.basename(result_image_path)}"}
 
-
 from fastapi.staticfiles import StaticFiles
 app.mount("/results", StaticFiles(directory=RESULT_DIR), name="results")
 
 if __name__ == "__main__":
     import uvicorn
     logger.info("Starting Uvicorn server for local development.")
-    uvicorn.run("main_prod_s3_upload:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
