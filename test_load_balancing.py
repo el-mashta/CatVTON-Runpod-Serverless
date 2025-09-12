@@ -16,6 +16,7 @@ import os
 import uuid
 import logging
 import asyncio
+import random
 from dotenv import load_dotenv
 import boto3
 import httpx
@@ -34,8 +35,8 @@ from botocore.config import Config as BotoConfig
 LOCAL_PERSON_IMAGE_PATH = "person.jpg"
 LOCAL_GARMENT_IMAGE_PATH = "garment.jpg"
 RESULT_DIR = "results_load_test"
-TOTAL_REQUESTS = 10
-MAX_CONCURRENT_TASKS = 10 # Controls how many requests are active at once
+TOTAL_REQUESTS = 30
+MAX_CONCURRENT_TASKS = 30 # Controls how many requests are active at once
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -48,6 +49,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 RUNPOD_API_KEY = os.getenv("RUNPOD_API_KEY")
 RUNPOD_ENDPOINT_ID = os.getenv("RUNPOD_ENDPOINT_ID")
+RUNPOD_ENDPOINT_ID_ALT = os.getenv("RUNPOD_ENDPOINT_ID_ALT")
 S3_ENDPOINT_URL = os.getenv("RUNPOD_S3_ENDPOINT_URL")
 S3_ACCESS_KEY_ID = os.getenv("RUNPOD_S3_ACCESS_KEY_ID")
 S3_SECRET_ACCESS_KEY = os.getenv("RUNPOD_S3_SECRET_ACCESS_KEY")
@@ -98,10 +100,16 @@ async def run_single_tryon_request(client: httpx.AsyncClient, request_num: int, 
                 "seed": -1
             }
             
-            tryon_url = f"https://{RUNPOD_ENDPOINT_ID}.api.runpod.ai/api/v1/tryon"
+            # Randomly select between the two endpoints if the ALT is available
+            endpoints = [RUNPOD_ENDPOINT_ID]
+            if RUNPOD_ENDPOINT_ID_ALT:
+                endpoints.append(RUNPOD_ENDPOINT_ID_ALT)
+            selected_endpoint_id = random.choice(endpoints)
+
+            tryon_url = f"https://{selected_endpoint_id}.api.runpod.ai/api/v1/tryon"
             headers = {"Authorization": f"Bearer {RUNPOD_API_KEY}"}
 
-            logger.info(f"[{request_id}] Sending request to Runpod endpoint...")
+            logger.info(f"[{request_id}] Sending request to Runpod endpoint ({selected_endpoint_id})...")
             response = await client.post(tryon_url, headers=headers, json=runpod_payload)
             
             logger.info(f"[{request_id}] Received response with status code: {response.status_code}")

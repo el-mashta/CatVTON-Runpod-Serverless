@@ -1,0 +1,12 @@
+{
+  "$schema": "https://charm.land/crush.json",
+  "mcp": {
+    "context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp",
+      "headers": {
+        "CONTEXT7_API_KEY": "ctx7sk-fb8c039c-de02-434a-abd5-8c2155f7f609"
+      }
+    }
+  }
+}

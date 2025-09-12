@@ -58,7 +58,7 @@ push-volume: build-volume
 
 # Build the development pod Docker image
 build-pod:
-    @docker buildx build --platform linux/amd64 --load -f Dockerfile.pod -t {{IMAGE_NAME_POD}} .
+    @docker buildx build --platform linux/amd64 --load -f Dockerfile.pod.final -t {{IMAGE_NAME_POD}} .
     @echo "Development pod image built: {{IMAGE_NAME_POD}}"
 
 # Build and push the development pod Docker image

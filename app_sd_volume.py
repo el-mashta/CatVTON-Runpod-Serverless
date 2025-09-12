@@ -57,23 +57,51 @@ async def lifespan(app: FastAPI):
     global pipeline, automasker
     logger.info("Server starting up, preparing to load models from network volume...")
 
-    # Define model paths on the network volume
-    base_model_path = os.path.join(NETWORK_VOLUME_PATH, "models", "stable-diffusion-inpainting")
-    catvton_model_path = os.path.join(NETWORK_VOLUME_PATH, "models", "CatVTON")
+    # --- Define Correct Model Paths ---
+    HF_HOME = "/runpod-volume/models"
     
-    if not os.path.isdir(base_model_path) or not os.path.isdir(catvton_model_path):
-        logger.error(f"FATAL: Model directory not found. Searched for '{base_model_path}' and '{catvton_model_path}'.")
-        raise RuntimeError("Model directory not found.")
+    # 1. Path to the new, optimized, merged UNet
+    merged_unet_path = os.path.join(HF_HOME, "catvton-unet-merged")
 
-    logger.info(f"Base model path: {base_model_path}")
-    logger.info(f"CatVTON adapter path: {catvton_model_path}")
+    # 2. Path to the original base model (needed for the scheduler)
+    # Note: Using the Hugging Face Hub cache structure
+    base_model_id = "stable-diffusion-v1-5/stable-diffusion-inpainting"
+    base_model_hub_path = os.path.join(HF_HOME, "hub", f"models--{base_model_id.replace('/', '--')}")
+    
+    # 3. Path to the original CatVTON model (needed for DensePose and SCHP)
+    catvton_model_id = "zhengchong/CatVTON"
+    catvton_model_hub_path = os.path.join(HF_HOME, "hub", f"models--{catvton_model_id.replace('/', '--')}")
+
+    # --- Find the latest snapshot directory for base and CatVTON models ---
+    try:
+        base_snapshot = max(os.listdir(os.path.join(base_model_hub_path, "snapshots")))
+        base_model_snapshot_path = os.path.join(base_model_hub_path, "snapshots", base_snapshot)
+        
+        catvton_snapshot = max(os.listdir(os.path.join(catvton_model_hub_path, "snapshots")))
+        catvton_model_snapshot_path = os.path.join(catvton_model_hub_path, "snapshots", catvton_snapshot)
+    except (FileNotFoundError, ValueError) as e:
+        logger.error(f"FATAL: Could not find downloaded model snapshots in {HF_HOME}/hub. "
+                     f"Please ensure models are downloaded correctly. Error: {e}")
+        raise RuntimeError("Downloaded model snapshot not found.")
+
+    # --- Verify all necessary paths exist before loading ---
+    required_paths = {
+        "Merged UNet": merged_unet_path,
+        "Base Model Snapshot": base_model_snapshot_path,
+        "CatVTON Model Snapshot": catvton_model_snapshot_path,
+    }
+    for name, path in required_paths.items():
+        if not os.path.isdir(path):
+            logger.error(f"FATAL: {name} directory not found at '{path}'.")
+            raise RuntimeError(f"{name} directory not found.")
+        logger.info(f"Found {name} at: {path}")
 
     try:
-        logger.info("Initializing CatVTONPipeline...")
-        # CORRECTED INITIALIZATION: Pass device and dtype to the constructor.
+        logger.info("Initializing CatVTONPipeline with optimized UNet...")
+        # --- CORRECTED INITIALIZATION using the new pipeline signature ---
         pipeline = CatVTONPipeline(
-            base_ckpt=base_model_path,
-            attn_ckpt=catvton_model_path,
+            unet_path=merged_unet_path,
+            base_ckpt=base_model_snapshot_path, # Used for the scheduler
             device="cuda",
             weight_dtype=torch.float16
         )
@@ -81,8 +109,8 @@ async def lifespan(app: FastAPI):
 
         logger.info("Initializing AutoMasker...")
         automasker = AutoMasker(
-            densepose_ckpt=os.path.join(catvton_model_path, "DensePose"),
-            schp_ckpt=os.path.join(catvton_model_path, "SCHP"),
+            densepose_ckpt=os.path.join(catvton_model_snapshot_path, "DensePose"),
+            schp_ckpt=os.path.join(catvton_model_snapshot_path, "SCHP"),
             device='cuda',
         )
         logger.info("AutoMasker loaded successfully.")

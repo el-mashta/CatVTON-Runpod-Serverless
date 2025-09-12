@@ -1,0 +1,61 @@
+# ====================================================================================
+# Dockerfile for a Development Pod Environment (v7 - Unified Paths)
+# ====================================================================================
+# This Dockerfile is for the setup pod. It provides a stable root SSH environment
+# and sets all environment variables to `/runpod-volume`, perfectly mirroring the
+# serverless worker's configuration.
+# ====================================================================================
+
+# Start from the exact same base image as the serverless worker
+FROM nvidia/cuda:12.1.1-base-ubuntu22.04
+
+WORKDIR /app
+
+# --- 1. Install System Dependencies (Worker Libs + SSH) ---
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Worker Dependencies
+    curl \
+    ca-certificates \
+    bash \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    ffmpeg \
+    # Dev Tools
+    openssh-server \
+    vim \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# --- 2. Install uv ---
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
+
+# --- 3. SSH Configuration for ROOT user ---
+RUN mkdir -p /root/.ssh && \
+    echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE8reWxn0Px1daHxku3K1jj1dEu4bCghmoGUx1Y3h4ye sharif@keystone" > /root/.ssh/authorized_keys && \
+    chmod 700 /root/.ssh && \
+    chmod 600 /root/.ssh/authorized_keys
+
+# Configure the SSH daemon to permit root login.
+RUN echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
+    echo "PasswordAuthentication no" >> /etc/ssh/sshd_config && \
+    echo "PubkeyAuthentication yes" >> /etc/ssh/sshd_config
+
+# --- 4. Copy Startup Script ---
+COPY start_ssh.sh .
+RUN chmod +x /app/start_ssh.sh
+
+# --- 5. Environment Variable Configuration (Unified Paths) ---
+# These paths are now IDENTICAL to the serverless worker's paths.
+ENV HF_HOME=/runpod-volume/models
+ENV HUGGINGFACE_HUB_CACHE=/runpod-volume/models
+ENV VENV_SITE_PACKAGES=/runpod-volume/venv/lib/python3.9/site-packages
+ENV PYTHONPATH=${VENV_SITE_PACKAGES}:/runpod-volume/CatVTON
+
+# --- 6. Expose Ports and Set Command ---
+EXPOSE 22 8000
+
+# Run the simple SSH startup script to keep the container alive for setup.
+CMD ["/bin/bash", "/app/start_ssh.sh"]
